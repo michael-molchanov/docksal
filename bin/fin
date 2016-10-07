@@ -473,13 +473,10 @@ is_docker_version ()
 
 is_docker_compose_version ()
 {
-	if is_linux; then
-		! which 'docker-compose' >/dev/null 2>&1 && return 1
-	else
-		[[ ! -x "$DOCKER_COMPOSE_BIN" ]] && return 1
-	fi
+	is_linux && DOCKER_COMPOSE_BIN="$DOCKER_COMPOSE_BIN_NIX"
+	! which "$DOCKER_COMPOSE_BIN" >/dev/null 2>&1 && return 1
 
-	local version=$(docker_compose version --short)
+	local version=$(docker_compose version --short | tr -d '\r')
 	[[ "$version" == "$REQUIREMENTS_DOCKER_COMPOSE" ]] && \
 		return 0;
 
@@ -496,6 +493,16 @@ is_docker_machine_version ()
 
 	local version=$(docker-machine -v | sed "s/.*version \(.*\),.*/\1/")
 	[[ "$version" == "$REQUIREMENTS_DOCKER_MACHINE" ]] && \
+		return 0;
+
+	return 1;
+}
+
+is_winpty_version ()
+{
+	! which winpty >/dev/null 2>&1 && return 1
+	local version=$(winpty --version | head -1 | sed 's/.*version \(.*\)/\1/')
+	[[ "$version" == "$REQUIREMENTS_WINPTY" ]] && \
 		return 0;
 
 	return 1;
@@ -1621,22 +1628,10 @@ install_tools ()
 	# If docker is already running, then we are doing an upgrade.
 	(which 'docker' >/dev/null 2>&1) && is_docker_running && UPGRADE_IN_PROGRESS=1 
 	
-	# Pre-update steps for boot2docker
-	if (is_mac || is_windows) && ! is_docker_native && [[ ${UPGRADE_IN_PROGRESS} == 1 ]]; then
-		update_system_images
-		# check latest boot2docker version
-		local b2d_version=$(docker version --format '{{.Server.Version}}')
-		# If VM needs to be updated, stop all project containers
-		if [[ "$b2d_version" != "$REQUIREMENTS_DOCKER" ]]; then
-			BOOT2DOCKER_NEEDS_AN_UPGRADE=1
-			_confirm "All containers will be stopped for vm upgrade. Continue? "
-		fi
-	fi
-
 	# Only update system images on Docker fro Mac/Windows
-	is_docker_native && \
-		update_system_images
-		# no return here
+	# is_docker_native && \
+	# 	update_system_images
+	# 	# no return here
 	
 	is_windows && \
 		install_tools_windows && \
@@ -1729,6 +1724,20 @@ install_sshagent_service ()
 		"${IMAGE_SSH_AGENT}:${FIN_ITAG}" >/dev/null
 }
 
+upgrade_vm ()
+{
+	# Check if VM needs to be upgraded.
+	local b2d_version=$(docker version --format '{{.Server.Version}}')
+	# If VM needs to be updated, stop all project containers
+	if [[ "$b2d_version" != "$REQUIREMENTS_DOCKER" ]]; then
+		is_docker_machine_running && \
+		echo-green "Upgrading Docker Machine..." && \
+		docker-machine upgrade "$DOCKER_MACHINE_NAME" && \
+		# Restart machine right after upgrade to avoid IP change and cert issues down the road.
+		docker_machine_stop && docker_machine_start
+	fi
+}
+
 # Install tools on Mac
 install_tools_mac ()
 {
@@ -1742,11 +1751,6 @@ install_tools_mac ()
 	elif ! is_vbox_version; then
 		echo-error "Required Virtual Box version is $REQUIREMENTS_VBOX or higher" \
 			&& exit 1
-# TODO: THESE LINES WERE COMMENTED OUT BECAUSE WE CAN NOT KILL THIS ADAPTER ON EACH UPGRADE
-#	else
-#		 Kill the default adapter and DHCP server to avoid network issues down the road
-#		 VBoxManage dhcpserver remove --netname HostInterfaceNetworking-vboxnet0 > /dev/null 2>&1
-#		 VBoxManage hostonlyif remove vboxnet0 > /dev/null 2>&1
 	fi
 
 	mkdir -p "$CONFIG_DOWNLOADS_DIR" 2>/dev/null
@@ -1770,20 +1774,19 @@ install_tools_mac ()
 	# Install docker-machine
 	if ! is_docker_machine_version; then
 		echo-green "Installing docker-machine v${REQUIREMENTS_DOCKER_MACHINE}..."
-		echo curl -sSL "$URL_DOCKER_MACHINE_MAC" -o "$DOCKER_MACHINE_BIN" && \
+		curl -sSL "$URL_DOCKER_MACHINE_MAC" -o "$DOCKER_MACHINE_BIN" && \
 			chmod +x "$DOCKER_MACHINE_BIN"
 	fi
 
 	# Cleanup
 	rm -rf "$CONFIG_DOWNLOADS_DIR" >/dev/null 2>&1
 
-	# If it was an upgrade
-	[[ "$BOOT2DOCKER_NEEDS_AN_UPGRADE" == "1" ]] && \
-		is_docker_machine_running && \
-		echo-green "Upgrading Docker Machine..." && \
-		docker-machine upgrade "$DOCKER_MACHINE_NAME" && \
-		# Restart machine right after upgrade to avoid IP change and cert issues down the road.
-		docker_machine_stop && docker_machine_start
+	if [[ $UPGRADE_IN_PROGRESS == 1 ]]; then
+		# Upgrade VM
+		upgrade_vm
+		# Update system images
+		update_system_images
+	fi
 }
 
 install_tools_windows ()
@@ -1791,18 +1794,19 @@ install_tools_windows ()
 	mkdir -p "$CONFIG_DOWNLOADS_DIR" 2>/dev/null
 	if_failed "Could not create $CONFIG_DOWNLOADS_DIR"
 
+	# Install winpty (should be first, as it may be used by other commands).
+	if ! is_winpty_version; then
+		echo-green "Installing winpty v${REQUIREMENTS_WINPTY}..."
+		(cd "$CONFIG_DOWNLOADS_DIR" && \
+			curl -sSL "$URL_WINPTY" | tar -xzf - && \
+			mv winpty-*/bin/* "$CONFIG_BIN_DIR/")
+	fi
+
 	if ! is_docker_native; then
 		# Check Virtual Box
 		if ! is_vbox_version; then # TODO: check_vbox_version should say where it looks for vbox. Not found or versions wrong?
 			echo-error "Required Virtual Box version is $REQUIREMENTS_VBOX or higher" \
 				&& exit 1
-# TODO: THESE LINES WERE COMMENTED OUT BECAUSE WE CAN NOT KILL THIS ADAPTER ON EACH UPGRADE
-#		else
-#			if [[ ${UPGRADE_IN_PROGRESS} != 1 ]]; then
-#				echo-green "Killing the default VirtualBox adapter and DHCP server to avoid network issues down the road"
-#				winsudo "$vboxmanage" dhcpserver remove --netname "HostInterfaceNetworking-VirtualBox Host-Only Ethernet Adapter"
-#				winsudo "$vboxmanage" hostonlyif remove "VirtualBox Host-Only Ethernet Adapter"
-#			fi
 		fi
 
 		# Install Docker client
@@ -1831,12 +1835,6 @@ install_tools_windows ()
 		fi
 	fi
 
-	# Install winpty TODO: check winpty version here
-	echo-green "Installing winpty v${REQUIREMENTS_WINPTY}..."
-	(cd "$CONFIG_DOWNLOADS_DIR" && \
-		curl -sSL "$URL_WINPTY" | tar -xzf - && \
-		mv winpty-*/bin/* "$CONFIG_BIN_DIR/")
-
 	# Cleanup
 	rm -rf "$CONFIG_DOWNLOADS_DIR" >/dev/null 2>&1
 
@@ -1852,14 +1850,11 @@ install_tools_windows ()
 		git config --system core.longpaths true # support long paths
 	fi
 
-	if ! is_docker_native; then
-		# If it was an upgrade
-		[[ "$BOOT2DOCKER_NEEDS_AN_UPGRADE" == "1" ]] && \
-			is_docker_machine_running && \
-			echo-green "Upgrading Docker Machine..." && \
-			docker-machine upgrade "$DOCKER_MACHINE_NAME" && \
-			# Restart machine right after upgrade to avoid IP change and cert issues down the road.
-			docker_machine_stop && docker_machine_start
+	if [[ $UPGRADE_IN_PROGRESS == 1 ]]; then
+		# Upgrade VM
+		upgrade_vm
+		# Update system images
+		update_system_images
 	fi
 }
 
