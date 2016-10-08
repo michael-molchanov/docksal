@@ -1628,11 +1628,6 @@ install_tools ()
 	# If docker is already running, then we are doing an upgrade.
 	(which 'docker' >/dev/null 2>&1) && is_docker_running && UPGRADE_IN_PROGRESS=1 
 	
-	# Only update system images on Docker fro Mac/Windows
-	# is_docker_native && \
-	# 	update_system_images
-	# 	# no return here
-	
 	is_windows && \
 		install_tools_windows && \
 		return
